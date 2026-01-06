@@ -1,6 +1,5 @@
 package com.example.API.Gateway.filter;
 
-
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.factory.AbstractGatewayFilterFactory;
@@ -12,6 +11,7 @@ import reactor.core.publisher.Mono;
 
 @Component
 public class AuthenticationFilter extends AbstractGatewayFilterFactory<AuthenticationFilter.Config> {
+    private static final String BEARER_PREFIX = "Bearer ";
 
     @Autowired
     private RouteValidator validator;
@@ -31,11 +31,10 @@ public class AuthenticationFilter extends AbstractGatewayFilterFactory<Authentic
                 if (!exchange.getRequest().getHeaders().containsKey(HttpHeaders.AUTHORIZATION)) {
                     return onError(exchange, "Missing authorization header", HttpStatus.UNAUTHORIZED);
                 }
-
                 String authHeader = exchange.getRequest().getHeaders().get(HttpHeaders.AUTHORIZATION).get(0);
 
-                if (authHeader != null && authHeader.startsWith("Bearer ")) {
-                    authHeader = authHeader.substring(7);
+                if (authHeader != null && authHeader.startsWith(BEARER_PREFIX)) {
+                    authHeader = authHeader.substring(BEARER_PREFIX.length()).trim();
                 }
 
                 try {

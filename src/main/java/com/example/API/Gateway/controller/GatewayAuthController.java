@@ -58,7 +58,6 @@ public class GatewayAuthController {
                             .bodyToMono(Long.class)
                             .flatMap(realUserId -> {
 
-                                // ШАГ 3 (ИСПРАВЛЕННЫЙ)
                                 return webClientBuilder.build()
                                         .put()
                                         .uri(uriBuilder -> UriComponentsBuilder
