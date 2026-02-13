@@ -1,14 +1,18 @@
 package com.example.API.Gateway.controller;
 
 import com.example.API.Gateway.dto.AggregatedRegisterDTO;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import org.springframework.web.util.UriComponentsBuilder;
 import reactor.core.publisher.Mono;
 
@@ -17,9 +21,10 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/gateway")
 @RequiredArgsConstructor
+@Slf4j
 public class GatewayAuthController {
 
-    private final WebClient.Builder webClientBuilder;
+    private final WebClient webClient;
 
     @Value("${services.auth.url}")
     private String authServiceUrl;
@@ -28,7 +33,8 @@ public class GatewayAuthController {
     private String userServiceUrl;
 
     @PostMapping("/register")
-    public Mono<ResponseEntity<String>> register(@RequestBody AggregatedRegisterDTO regDto) {
+    public Mono<ResponseEntity<String>> register(@Valid @RequestBody AggregatedRegisterDTO regDto) {
+        log.info("Starting registration saga for email: {}", regDto.email());
 
         Map<String, String> authRequest = Map.of(
                 "email", regDto.email(),
@@ -42,24 +48,23 @@ public class GatewayAuthController {
                 "birthDate", regDto.birthDate()
         );
 
-        return webClientBuilder.build()
-                .post()
+        return webClient.post()
                 .uri(authServiceUrl + "/api/auth/register")
                 .bodyValue(authRequest)
                 .retrieve()
                 .toBodilessEntity()
+                .doOnSuccess(r -> log.debug("Step 1: Auth credentials created"))
                 .flatMap(authResponse -> {
 
-                    return webClientBuilder.build()
-                            .post()
+                    return webClient.post()
                             .uri(userServiceUrl + "/api/users/internal/create")
                             .bodyValue(userRequest)
                             .retrieve()
-                            .bodyToMono(Long.class)
+                            .bodyToMono(Long.class) // Получаем реальный ID
+                            .doOnNext(id -> log.debug("Step 2: User profile created with ID: {}", id))
                             .flatMap(realUserId -> {
 
-                                return webClientBuilder.build()
-                                        .put()
+                                return webClient.put()
                                         .uri(uriBuilder -> UriComponentsBuilder
                                                 .fromUriString(authServiceUrl)
                                                 .path("/api/auth/internal/sync-id")
@@ -69,18 +74,30 @@ public class GatewayAuthController {
                                                 .toUri())
                                         .retrieve()
                                         .toBodilessEntity()
-                                        .map(r -> ResponseEntity.ok("Registration successful"));
+                                        .map(r -> {
+                                            log.info("Step 3: ID synchronized. Registration complete.");
+                                            return ResponseEntity.ok("Registration successful");
+                                        });
                             });
                 })
-                .onErrorResume(e -> {
-                    System.err.println("Error: " + e.getMessage());
-                    return webClientBuilder.build()
-                            .delete()
-                            .uri(authServiceUrl + "/api/auth/internal/rollback/" + regDto.email())
-                            .retrieve()
-                            .toBodilessEntity()
-                            .onErrorResume(ex -> Mono.empty())
-                            .then(Mono.just(ResponseEntity.badRequest().body("Registration failed. Rolled back.")));
-                });
+                .onErrorResume(e -> handleRegistrationError(e, regDto.email()));
+    }
+
+    private Mono<ResponseEntity<String>> handleRegistrationError(Throwable e, String email) {
+        log.error("Registration failed for {}: {}", email, e.getMessage());
+        if (e instanceof WebClientResponseException ex && ex.getStatusCode().equals(HttpStatus.CONFLICT)) {
+            return Mono.just(ResponseEntity.status(HttpStatus.CONFLICT).body("User already exists"));
+        }
+
+        return webClient.delete()
+                .uri(authServiceUrl + "/api/auth/internal/rollback/" + email)
+                .retrieve()
+                .toBodilessEntity()
+                .doOnSuccess(v -> log.info("Rollback successful for {}", email))
+                .onErrorResume(rollbackEx -> {
+                    log.error("Rollback failed! Data inconsistency for email: {}", email);
+                    return Mono.empty();
+                })
+                .then(Mono.just(ResponseEntity.badRequest().body("Registration failed. Please try again.")));
     }
 }
